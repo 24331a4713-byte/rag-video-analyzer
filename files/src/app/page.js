@@ -2,8 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 
-const API = 'https://your-render-url.onrender.com'
-
+const API = 'https://rag-video-analyzer-production.up.railway.app'
 // ── helpers ──────────────────────────────────────────────
 function fmt(n) {
   if (n == null || n === 0 || n === '') return 'N/A'
