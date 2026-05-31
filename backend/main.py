@@ -16,7 +16,6 @@ load_dotenv()
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
 
-# Global state
 current_vectorstore = None
 current_hybrid_retriever = None
 current_metadata_y = None
@@ -31,10 +30,16 @@ def extract_video_id(url):
 
 def get_transcript(url):
     video_id = extract_video_id(url)
-    ytt_api = YouTubeTranscriptApi()
-    transcript = ytt_api.fetch(video_id, languages=['en'])
-    text = " ".join(snippet.text for snippet in transcript)
-    return text
+    try:
+        ytt_api = YouTubeTranscriptApi()
+        transcript = ytt_api.fetch(video_id, languages=['en'])
+        return " ".join(snippet.text for snippet in transcript)
+    except Exception:
+        # fallback for cloud IP blocks — use yt-dlp description
+        ydl_opts = {"quiet": True, "skip_download": True}
+        with YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get("description", "") or info.get("title", "")
 
 def clean_text(text):
     text = re.sub(r'\[.*?\]', '', text)
@@ -72,12 +77,8 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://rag-video-analyzer-2.onrender.com",
-        "http://localhost:3000",
-        "*"
-    ],
-    allow_credentials=False,
+    allow_origins=["*"],        # fix 1: wildcard only, no list mixing
+    allow_credentials=False,    # fix 2: must be False when origins is "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -94,11 +95,10 @@ class ChatRequest(BaseModel):
 @app.post("/extract")
 async def extract_videos(req: ExtractRequest):
     global current_vectorstore, current_hybrid_retriever, current_metadata_y, current_metadata_i
-    
-    # Load embeddings only when needed
+
     from langchain_community.embeddings import HuggingFaceEmbeddings
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-    
+
     url_yt = req.youtube_url
     url_ig = req.instagram_url
 
@@ -107,7 +107,12 @@ async def extract_videos(req: ExtractRequest):
     current_metadata_y = get_video_metadata(url_yt)
     youtube_video_id = extract_video_id(url_yt)
 
-    with YoutubeDL({"cookiefile": "cookies.txt", "quiet": True}) as ydl:
+    cookies_path = "cookies.txt"
+    ydl_opts = {"quiet": True}
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+
+    with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url_ig, download=False)
 
     current_metadata_i = {
@@ -146,7 +151,7 @@ async def extract_videos(req: ExtractRequest):
         )
 
     current_vectorstore = FAISS.from_documents(documents, embeddings)
-    
+
     mmr_retriever = current_vectorstore.as_retriever(
         search_type="mmr",
         search_kwargs={"k": 4, "fetch_k": 20, "lambda_mult": 0.6}
@@ -178,7 +183,7 @@ async def extract_videos(req: ExtractRequest):
 async def chat(req: ChatRequest):
     if not current_hybrid_retriever:
         return {"response": "Extract videos first"}
-    
+
     docs = current_hybrid_retriever.invoke(req.question)
     context = "\n\n".join([d.page_content for d in docs])
 
