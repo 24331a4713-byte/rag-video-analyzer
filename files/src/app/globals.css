@@ -1,0 +1,40 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Unbounded:wght@400;700;900&display=swap');
+
+:root {
+  --bg:       #080b0f;
+  --surface:  #0e1318;
+  --surface2: #141920;
+  --border:   #1e2730;
+  --border2:  #2a3540;
+  --accent:   #00ff87;
+  --accent2:  #00c8ff;
+  --yt:       #ff3b3b;
+  --ig:       #ff6ec7;
+  --text:     #e8edf2;
+  --muted:    #4a5568;
+  --muted2:   #6b7a8d;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'IBM Plex Mono', monospace;
+  min-height: 100vh;
+  /* subtle scanline texture */
+  background-image: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,255,135,0.012) 2px,
+    rgba(0,255,135,0.012) 4px
+  );
+}
+
+::selection { background: var(--accent); color: #080b0f; }
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }

@@ -1,0 +1,19 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+faiss_index/
+
+# Node
+node_modules/
+.next/
+
+# Secrets — NEVER push these
+backend/.env
+backend/cookies.txt
+backend/cookies.txt.txt
+backend/insta_video.mp4
+
+# OS
+.DS_Store
+Thumbs.db
