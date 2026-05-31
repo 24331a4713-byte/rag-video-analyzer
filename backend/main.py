@@ -1,5 +1,4 @@
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
 import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
@@ -8,13 +7,15 @@ from yt_dlp import YoutubeDL
 from langchain_community.retrievers import BM25Retriever
 import os
 from langchain_groq import ChatGroq
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from faster_whisper import WhisperModel
 
 load_dotenv()
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
+whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
 
 current_vectorstore = None
 current_hybrid_retriever = None
@@ -28,32 +29,69 @@ def extract_video_id(url):
         raise ValueError("invalid youtube url")
     return match.group(1)
 
-def get_transcript(url):
-    try:
-        video_id = extract_video_id(url)
-        ytt_api = YouTubeTranscriptApi()
-        transcript = ytt_api.fetch(video_id, languages=['en'])
-        text = " ".join(snippet.text for snippet in transcript)
-        return text
-    except Exception as e:
-        return f"Could not fetch transcript: {str(e)}"
+def transcribe_audio(audio_path: str) -> str:
+    segments, _ = whisper_model.transcribe(audio_path)
+    return " ".join(s.text for s in segments)
+
+def get_youtube_transcript(url: str) -> str:
+    audio_path = "/tmp/yt_audio.mp3"
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": "/tmp/yt_audio.%(ext)s",
+        "quiet": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+        }],
+    }
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    transcript = transcribe_audio(audio_path)
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
+    return transcript
+
+def get_instagram_transcript(url: str) -> str:
+    audio_path = "/tmp/ig_audio.mp3"
+    cookies_path = "cookies.txt"
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": "/tmp/ig_audio.%(ext)s",
+        "quiet": True,
+        "postprocessors": [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+        }],
+    }
+    if os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    transcript = transcribe_audio(audio_path)
+    if os.path.exists(audio_path):
+        os.remove(audio_path)
+    return transcript
 
 def clean_text(text):
     text = re.sub(r'\[.*?\]', '', text)
     text = re.sub(r'\s+', ' ', text)
-    text = text.strip()
-    return text
+    return text.strip()
 
-def get_video_metadata(url):
-    ydl_opts = {"quiet": True}
+def get_video_metadata(url: str, cookies_path: str = None) -> dict:
+    ydl_opts = {"quiet": True, "skip_download": True}
+    if cookies_path and os.path.exists(cookies_path):
+        ydl_opts["cookiefile"] = cookies_path
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
     return {
-        "title": info.get("title"),
-        "channel": info.get("uploader"),
-        "views": info.get("view_count"),
-        "likes": info.get("like_count"),
-        "duration": info.get("duration")
+        "title":   info.get("title", ""),
+        "channel": info.get("uploader", ""),
+        "views":   info.get("view_count") or 0,
+        "likes":   info.get("like_count") or 0,
+        "duration": info.get("duration") or 0,
+        "id":      info.get("id", ""),
+        "creator": info.get("uploader", ""),
+        "comments": info.get("comment_count") or 0,
     }
 
 class HybridRetriever:
@@ -93,104 +131,86 @@ class ChatRequest(BaseModel):
 async def extract_videos(req: ExtractRequest):
     global current_vectorstore, current_hybrid_retriever, current_metadata_y, current_metadata_i
 
-    from langchain_community.embeddings import HuggingFaceEmbeddings
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-    
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    try:
+        from langchain_community.embeddings import HuggingFaceEmbeddings
+        embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+        splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
-    url_yt = req.youtube_url
-    url_ig = req.instagram_url
+        # YouTube — yt-dlp + Whisper (no IP block issue)
+        youtube_text     = clean_text(get_youtube_transcript(req.youtube_url))
+        current_metadata_y = get_video_metadata(req.youtube_url)
+        youtube_video_id = extract_video_id(req.youtube_url)
 
-    # YouTube
-    youtube_text = get_transcript(url_yt)
-    youtube_text = clean_text(youtube_text)
-    current_metadata_y = get_video_metadata(url_yt)
-    youtube_video_id = extract_video_id(url_yt)
+        # Instagram — yt-dlp + Whisper
+        insta_text       = clean_text(get_instagram_transcript(req.instagram_url))
+        current_metadata_i = get_video_metadata(req.instagram_url, cookies_path="cookies.txt")
 
-    # Instagram
-    cookies_path = "cookies.txt"
-    ydl_opts = {"quiet": True}
-    if os.path.exists(cookies_path):
-        ydl_opts["cookiefile"] = cookies_path
+        # Chunk
+        chunks_youtube = splitter.split_text(youtube_text)
+        chunks_insta   = splitter.split_text(insta_text)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url_ig, download=False)
-    
-    insta_text = info.get("description") or ""
-    insta_text = clean_text(insta_text)
-    
-    current_metadata_i = {
-        "id": info.get("id"),
-        "title": info.get("title"),
-        "creator": info.get("uploader"),
-        "views": info.get("view_count") or 0,
-        "likes": info.get("like_count") or 0,
-        "comments": info.get("comment_count") or 0,
-    }
+        # Documents
+        documents = []
+        for chunk in chunks_youtube:
+            documents.append(Document(
+                page_content=chunk,
+                metadata={
+                    "source":   "youtube",
+                    "video_id": youtube_video_id,
+                    "title":    current_metadata_y["title"],
+                    "views":    current_metadata_y["views"],
+                    "likes":    current_metadata_y["likes"],
+                }
+            ))
+        for chunk in chunks_insta:
+            documents.append(Document(
+                page_content=chunk,
+                metadata={
+                    "source":   "instagram",
+                    "video_id": current_metadata_i["id"],
+                    "title":    current_metadata_i["title"],
+                    "views":    current_metadata_i["views"],
+                    "likes":    current_metadata_i["likes"],
+                }
+            ))
 
-    # Split text into chunks
-    chunks_youtube = splitter.split_text(youtube_text)
-    chunks_insta = splitter.split_text(insta_text)
+        # FAISS + retrievers
+        current_vectorstore = FAISS.from_documents(documents, embeddings)
+        mmr_retriever = current_vectorstore.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 4, "fetch_k": 20, "lambda_mult": 0.6}
+        )
+        bm25_retriever   = BM25Retriever.from_documents(documents)
+        bm25_retriever.k = 4
+        current_hybrid_retriever = HybridRetriever(mmr_retriever, bm25_retriever)
 
-    # Create documents
-    documents = []
-    for chunk in chunks_youtube:
-        documents.append(
-            Document(page_content=chunk, metadata={
-                "source": "youtube",
+        return {
+            "video_a": {
                 "video_id": youtube_video_id,
-                "title": current_metadata_y["title"],
-                "views": current_metadata_y["views"],
-                "likes": current_metadata_y["likes"]
-            })
-        )
-    for chunk in chunks_insta:
-        documents.append(
-            Document(page_content=chunk, metadata={
-                "source": "instagram",
+                "title":    current_metadata_y["title"],
+                "views":    current_metadata_y["views"],
+                "likes":    current_metadata_y["likes"],
+                "channel":  current_metadata_y["channel"],
+            },
+            "video_b": {
                 "video_id": current_metadata_i["id"],
-                "title": current_metadata_i["title"],
-                "views": current_metadata_i["views"],
-                "likes": current_metadata_i["likes"]
-            })
-        )
-
-    # Create vectorstore and retrievers
-    current_vectorstore = FAISS.from_documents(documents, embeddings)
-
-    mmr_retriever = current_vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs={"k": 4, "fetch_k": 20, "lambda_mult": 0.6}
-    )
-
-    bm25_retriever = BM25Retriever.from_documents(documents)
-    bm25_retriever.k = 4
-
-    current_hybrid_retriever = HybridRetriever(mmr_retriever, bm25_retriever)
-
-    return {
-        "video_a": {
-            "video_id": youtube_video_id,
-            "title": current_metadata_y["title"],
-            "views": current_metadata_y["views"],
-            "likes": current_metadata_y["likes"],
-            "channel": current_metadata_y["channel"]
-        },
-        "video_b": {
-            "video_id": current_metadata_i["id"],
-            "title": current_metadata_i["title"],
-            "views": current_metadata_i["views"],
-            "likes": current_metadata_i["likes"],
-            "creator": current_metadata_i["creator"]
+                "title":    current_metadata_i["title"],
+                "views":    current_metadata_i["views"],
+                "likes":    current_metadata_i["likes"],
+                "creator":  current_metadata_i["creator"],
+            }
         }
-    }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
     if not current_hybrid_retriever:
         return {"response": "Extract videos first"}
 
-    docs = current_hybrid_retriever.invoke(req.question)
+    docs    = current_hybrid_retriever.invoke(req.question)
     context = "\n\n".join([d.page_content for d in docs])
 
     prompt = f"""
@@ -220,9 +240,11 @@ Comparison:
     response = llm.invoke(prompt)
     return {"response": response.content}
 
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
 
 if __name__ == "__main__":
     import uvicorn
