@@ -1,4 +1,6 @@
 from dotenv import load_dotenv
+from youtube_transcript_api import YouTubeTranscriptApi
+import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -9,11 +11,11 @@ from langchain_groq import ChatGroq
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from faster_whisper import WhisperModel
+
 load_dotenv()
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
-whisper_model = WhisperModel("base")
+
 current_vectorstore = None
 current_hybrid_retriever = None
 current_metadata_y = None
@@ -26,27 +28,16 @@ def extract_video_id(url):
         raise ValueError("invalid youtube url")
     return match.group(1)
 
-
 def get_transcript(url):
-    
-    ydl_opts = {
-        "format": "bestaudio/best",
-        "outtmpl": "youtube_audio.%(ext)s",
-        "quiet": True
-    }
+    try:
+        video_id = extract_video_id(url)
+        ytt_api = YouTubeTranscriptApi()
+        transcript = ytt_api.fetch(video_id, languages=['en'])
+        text = " ".join(snippet.text for snippet in transcript)
+        return text
+    except Exception as e:
+        return f"Could not fetch transcript: {str(e)}"
 
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
-
-    segments, info = whisper_model.transcribe("youtube_audio.webm")
-
-    text = " ".join(
-        segment.text
-        for segment in segments
-    )
-
-    return text
-    
 def clean_text(text):
     text = re.sub(r'\[.*?\]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -83,8 +74,8 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        # fix 1: wildcard only, no list mixing
-    allow_credentials=False,    # fix 2: must be False when origins is "*"
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -104,15 +95,19 @@ async def extract_videos(req: ExtractRequest):
 
     from langchain_community.embeddings import HuggingFaceEmbeddings
     embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    
+    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
 
     url_yt = req.youtube_url
     url_ig = req.instagram_url
 
+    # YouTube
     youtube_text = get_transcript(url_yt)
     youtube_text = clean_text(youtube_text)
     current_metadata_y = get_video_metadata(url_yt)
     youtube_video_id = extract_video_id(url_yt)
 
+    # Instagram
     cookies_path = "cookies.txt"
     ydl_opts = {"quiet": True}
     if os.path.exists(cookies_path):
@@ -120,9 +115,10 @@ async def extract_videos(req: ExtractRequest):
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url_ig, download=False)
+    
     insta_text = info.get("description") or ""
     insta_text = clean_text(insta_text)
-    chunks_insta = splitter.split_text(insta_text)
+    
     current_metadata_i = {
         "id": info.get("id"),
         "title": info.get("title"),
@@ -132,10 +128,11 @@ async def extract_videos(req: ExtractRequest):
         "comments": info.get("comment_count") or 0,
     }
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+    # Split text into chunks
     chunks_youtube = splitter.split_text(youtube_text)
-    
+    chunks_insta = splitter.split_text(insta_text)
 
+    # Create documents
     documents = []
     for chunk in chunks_youtube:
         documents.append(
@@ -158,6 +155,7 @@ async def extract_videos(req: ExtractRequest):
             })
         )
 
+    # Create vectorstore and retrievers
     current_vectorstore = FAISS.from_documents(documents, embeddings)
 
     mmr_retriever = current_vectorstore.as_retriever(
