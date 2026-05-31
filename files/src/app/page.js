@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 
-const API = 'http://localhost:8000'
+const API = 'https://your-render-url.onrender.com'
 
 // ── helpers ──────────────────────────────────────────────
 function fmt(n) {
