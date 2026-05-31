@@ -1,6 +1,4 @@
 from dotenv import load_dotenv
-from youtube_transcript_api import YouTubeTranscriptApi
-import re
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -11,11 +9,11 @@ from langchain_groq import ChatGroq
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-
+from faster_whisper import WhisperModel
 load_dotenv()
 
 llm = ChatGroq(model="llama-3.3-70b-versatile", api_key=os.getenv("GROQ_API_KEY"))
-
+whisper_model = WhisperModel("base")
 current_vectorstore = None
 current_hybrid_retriever = None
 current_metadata_y = None
@@ -28,18 +26,25 @@ def extract_video_id(url):
         raise ValueError("invalid youtube url")
     return match.group(1)
 
+
 def get_transcript(url):
-    video_id = extract_video_id(url)
-    ytt_api = YouTubeTranscriptApi()
-    try:
-        transcript = ytt_api.fetch(video_id, languages=['en'])
-    except Exception:
-        transcript = ytt_api.fetch(
-            video_id,
-            languages=['en'],
-            proxies={'https': 'http://38.154.203.95:8800'}
-        )
-    text = " ".join(snippet.text for snippet in transcript)
+    
+    ydl_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": "youtube_audio.%(ext)s",
+        "quiet": True
+    }
+
+    with YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    segments, info = whisper_model.transcribe("youtube_audio.webm")
+
+    text = " ".join(
+        segment.text
+        for segment in segments
+    )
+
     return text
     
 def clean_text(text):
@@ -115,7 +120,9 @@ async def extract_videos(req: ExtractRequest):
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url_ig, download=False)
-
+    insta_text = info.get("description") or ""
+    insta_text = clean_text(insta_text)
+    chunks_insta = splitter.split_text(insta_text)
     current_metadata_i = {
         "id": info.get("id"),
         "title": info.get("title"),
@@ -127,7 +134,7 @@ async def extract_videos(req: ExtractRequest):
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks_youtube = splitter.split_text(youtube_text)
-    chunks_insta = []
+    
 
     documents = []
     for chunk in chunks_youtube:
