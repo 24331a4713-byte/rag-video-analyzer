@@ -93,7 +93,7 @@ async def extract_videos(req: ExtractRequest):
     
     # Load embeddings only when needed
     from langchain_community.embeddings import HuggingFaceEmbeddings
-    embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     
     url_yt = req.youtube_url
     url_ig = req.instagram_url
