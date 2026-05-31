@@ -30,17 +30,18 @@ def extract_video_id(url):
 
 def get_transcript(url):
     video_id = extract_video_id(url)
+    ytt_api = YouTubeTranscriptApi()
     try:
-        ytt_api = YouTubeTranscriptApi()
         transcript = ytt_api.fetch(video_id, languages=['en'])
-        return " ".join(snippet.text for snippet in transcript)
     except Exception:
-        # fallback for cloud IP blocks — use yt-dlp description
-        ydl_opts = {"quiet": True, "skip_download": True}
-        with YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info.get("description", "") or info.get("title", "")
-
+        transcript = ytt_api.fetch(
+            video_id,
+            languages=['en'],
+            proxies={'https': 'http://38.154.203.95:8800'}
+        )
+    text = " ".join(snippet.text for snippet in transcript)
+    return text
+    
 def clean_text(text):
     text = re.sub(r'\[.*?\]', '', text)
     text = re.sub(r'\s+', ' ', text)
